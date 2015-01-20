@@ -58,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -67,8 +68,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import org.jboss.as.controller.ControlledProcessState;
 import org.jboss.as.controller.ControlledProcessStateService;
-
 import org.jboss.as.controller.OperationFailedException;
+
 import org.jboss.as.controller.operations.common.Util;
 import org.jboss.as.server.deployment.DeploymentAddHandler;
 import org.jboss.as.server.deployment.DeploymentDeployHandler;
@@ -153,6 +154,8 @@ class FileSystemDeploymentService implements DeploymentScanner {
         public void run() {
             try {
                 scan();
+            } catch (RejectedExecutionException e) {
+                //Do nothing as this happens if a scan occurs during a reload of shutdown of a server.
             } catch (Exception e) {
                 ROOT_LOGGER.scanException(e, deploymentDir.getAbsolutePath());
             }
@@ -415,8 +418,11 @@ class FileSystemDeploymentService implements DeploymentScanner {
                 for (String toUndeploy : scannedDeployments) {
                     scannerTasks.add(new UndeployTask(toUndeploy, deploymentDir, scanContext.scanStartTime, true));
                 }
-
-                executeScannerTasks(scannerTasks, deploymentOperations, true, new ScanResult());
+                try {
+                    executeScannerTasks(scannerTasks, deploymentOperations, true, new ScanResult());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
 
                 ROOT_LOGGER.tracef("Forced undeploy scan complete");
             } catch (Exception e) {
@@ -501,9 +507,11 @@ class FileSystemDeploymentService implements DeploymentScanner {
                 for (Map.Entry<String, DeploymentMarker> missing : scanContext.toRemove.entrySet()) {
                     scannerTasks.add(new UndeployTask(missing.getKey(), missing.getValue().parentFolder, scanContext.scanStartTime, false));
                 }
-
-                executeScannerTasks(scannerTasks, deploymentOperations, oneOffScan, scanResult);
-
+                try {
+                    executeScannerTasks(scannerTasks, deploymentOperations, oneOffScan, scanResult);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
                 ROOT_LOGGER.tracef("Scan complete");
                 firstScan = false;
             }
@@ -513,7 +521,7 @@ class FileSystemDeploymentService implements DeploymentScanner {
     }
 
     private void executeScannerTasks(List<ScannerTask> scannerTasks, DeploymentOperations deploymentOperations,
-                                     boolean oneOffScan, ScanResult scanResult) {
+                                     boolean oneOffScan, ScanResult scanResult) throws InterruptedException {
         // Process the tasks
         if (scannerTasks.size() > 0) {
             List<ModelNode> updates = new ArrayList<ModelNode>(scannerTasks.size());
@@ -521,6 +529,7 @@ class FileSystemDeploymentService implements DeploymentScanner {
             for (ScannerTask task : scannerTasks) {
                 task.recordInProgress(); // puts down .isdeploying, .isundeploying
                 final ModelNode update = task.getUpdate();
+                ROOT_LOGGER.infof("Deployment scan of [%s] found update action [%s]", deploymentDir, update);
                 if (ROOT_LOGGER.isDebugEnabled()) {
                     ROOT_LOGGER.debugf("Deployment scan of [%s] found update action [%s]", deploymentDir, update);
                 }
@@ -544,6 +553,9 @@ class FileSystemDeploymentService implements DeploymentScanner {
                         task.handleFailureResult(failure);
                     }
                     break;
+                } catch (InterruptedException e) {
+                    futureResults.cancel(true);
+                    throw e;
                 } catch (Exception e) {
                     ROOT_LOGGER.fileSystemDeploymentFailed(e);
                     futureResults.cancel(true);
@@ -1039,15 +1051,15 @@ class FileSystemDeploymentService implements DeploymentScanner {
      */
     private void cancelScan() {
         if (rescanIncompleteTask != null) {
-            rescanIncompleteTask.cancel(false);
+            rescanIncompleteTask.cancel(true);
             rescanIncompleteTask = null;
         }
         if (rescanUndeployTask != null) {
-            rescanUndeployTask.cancel(false);
+            rescanUndeployTask.cancel(true);
             rescanUndeployTask = null;
         }
         if (scanTask != null) {
-            scanTask.cancel(false);
+            scanTask.cancel(true);
             scanTask = null;
         }
     }
